@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wissens-Chatbot</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --fl: #ffffff; --text: #1d1d1b; --leise: #6b6b66;
+    --akzent: #2f5d8a; --nutzer: #e4ecf4; --rand: #dcdcd6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161615; --fl: #1f1f1e; --text: #ececea; --leise: #9a9a94;
+            --akzent: #8bb6e0; --nutzer: #233140; --rand: #33332f; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 16px; min-height: 100vh;
+         display: flex; flex-direction: column; }
+  h1 { font-size: 1.15rem; margin: 8px 0 16px; }
+  #verlauf { flex: 1; display: flex; flex-direction: column; gap: 12px; }
+  .msg { padding: 12px 14px; border-radius: 10px; background: var(--fl);
+         border: 1px solid var(--rand); overflow-wrap: anywhere; }
+  .msg.nutzer { background: var(--nutzer); align-self: flex-end; max-width: 85%; white-space: pre-wrap; }
+  .msg p { margin: 0 0 .6em; } .msg p:last-child { margin: 0; }
+  .msg ul { margin: 0 0 .6em; padding-left: 1.2em; }
+  .quellen { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--rand);
+             font-size: .85rem; color: var(--leise); }
+  .quellen ol { margin: 4px 0 0; padding-left: 1.4em; }
+  a { color: var(--akzent); }
+  .fehler { color: #b3261e; }
+  .leer { color: var(--leise); }
+  form { position: sticky; bottom: 0; background: var(--bg); padding: 12px 0;
+         display: flex; gap: 8px; }
+  textarea { flex: 1; resize: none; font: inherit; padding: 10px; border-radius: 8px;
+             border: 1px solid var(--rand); background: var(--fl); color: var(--text); }
+  button { font: inherit; padding: 0 18px; border: 0; border-radius: 8px;
+           background: var(--akzent); color: var(--bg); cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Wissens-Chatbot</h1>
+  <div id="verlauf"><p class="leer">Stelle eine Frage zu den Dokumenten der Wissensbasis.</p></div>
+  <form id="form">
+    <textarea id="eingabe" rows="2" placeholder="Frage eingeben … (Enter senden, Shift+Enter neue Zeile)" required></textarea>
+    <button id="senden">Senden</button>
+  </form>
+</main>
+<script>
+const verlauf = [];
+const box = document.getElementById("verlauf");
+const form = document.getElementById("form");
+const eingabe = document.getElementById("eingabe");
+const knopf = document.getElementById("senden");
+
+const esc = s => s.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function markdown(text, quellen) {
+  const zeilen = esc(text).split("\n");
+  let html = "", liste = false, absatz = [];
+  const fluss = () => { if (absatz.length) { html += "<p>" + absatz.join("<br>") + "</p>"; absatz = []; } };
+  for (const z of zeilen) {
+    const li = z.match(/^\s*(?:[-*]|\d+\.)\s+(.*)/);
+    if (li) { fluss(); if (!liste) { html += "<ul>"; liste = true; } html += "<li>" + li[1] + "</li>"; continue; }
+    if (liste) { html += "</ul>"; liste = false; }
+    if (!z.trim()) { fluss(); continue; }
+    absatz.push(z.replace(/^#+\s*/, ""));
+  }
+  fluss(); if (liste) html += "</ul>";
+  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  return html.replace(/\[(\d+)\]/g, (m, n) => {
+    const q = quellen[n - 1];
+    return q && q.url ? `<a href="${esc(q.url)}" target="_blank" rel="noopener" title="${esc(q.titel || "")}">[${n}]</a>` : m;
+  });
+}
+
+function quellenHtml(quellen, text) {
+  const genutzt = new Set([...text.matchAll(/\[(\d+)\]/g)].map(m => +m[1]));
+  const liste = quellen.filter(q => genutzt.has(q.nr));
+  if (!liste.length) return "";
+  return `<div class="quellen">Quellen:<ol>` + liste.map(q =>
+    `<li value="${q.nr}"><a href="${esc(q.url || "#")}" target="_blank" rel="noopener">${esc(q.titel || "Dokument")}</a>` +
+    (q.abschnitt ? ` – ${esc(q.abschnitt)}` : "") +
+    (q.geaendert_am ? ` (Stand ${esc(q.geaendert_am.slice(0, 10))})` : "") + `</li>`).join("") + `</ol></div>`;
+}
+
+function blase(klasse) {
+  box.querySelector(".leer")?.remove();
+  const d = document.createElement("div");
+  d.className = "msg " + klasse;
+  box.appendChild(d);
+  return d;
+}
+
+async function senden(frage) {
+  verlauf.push({ rolle: "nutzer", text: frage });
+  blase("nutzer").textContent = frage;
+  const antwort = blase("assistent");
+  antwort.innerHTML = '<span class="leer">…</span>';
+  knopf.disabled = true;
+  let text = "", quellen = [], fehler = "";
+  try {
+    const r = await fetch("api/chat", { method: "POST", headers: { "Content-Type": "application/json" },
+                                         body: JSON.stringify({ nachrichten: verlauf.slice(-20) }) });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const leser = r.body.getReader(), dek = new TextDecoder();
+    let puffer = "";
+    for (;;) {
+      const { value, done } = await leser.read();
+      if (done) break;
+      puffer += dek.decode(value, { stream: true });
+      let i;
+      while ((i = puffer.indexOf("\n\n")) >= 0) {
+        const block = puffer.slice(0, i); puffer = puffer.slice(i + 2);
+        const ev = block.match(/^event: (.*)$/m)?.[1];
+        const daten = JSON.parse(block.match(/^data: (.*)$/m)?.[1] ?? "null");
+        if (ev === "quellen") quellen = daten;
+        else if (ev === "text") text += daten;
+        else if (ev === "fehler") fehler = daten;
+        antwort.innerHTML = markdown(text, quellen) + quellenHtml(quellen, text) +
+          (fehler ? `<p class="fehler">${esc(fehler)}</p>` : "");
+        window.scrollTo(0, document.body.scrollHeight);
+      }
+    }
+  } catch (e) {
+    antwort.innerHTML += `<p class="fehler">Verbindungsfehler: ${esc(e.message)}</p>`;
+  }
+  verlauf.push({ rolle: "assistent", text: text || "(keine Antwort)" });
+  knopf.disabled = false;
+  eingabe.focus();
+}
+
+form.addEventListener("submit", e => {
+  e.preventDefault();
+  const frage = eingabe.value.trim();
+  if (!frage || knopf.disabled) return;
+  eingabe.value = "";
+  senden(frage);
+});
+eingabe.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
+});
+</script>
+</body>
+</html>
